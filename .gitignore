@@ -1,0 +1,4 @@
+.env
+
+backend/.venv
+llm-server/node_modules
