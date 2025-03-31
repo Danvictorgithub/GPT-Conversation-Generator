@@ -2,4 +2,5 @@
 
 backend/.venv
 backend/__pycache__
+
 llm-server/node_modules
