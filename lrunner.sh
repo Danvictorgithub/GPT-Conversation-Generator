@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Activate the virtual environment
-source ./gpt-scraperdj-astro/backend/.venv/bin/activate
+source ./backend/.venv/bin/activate
 
 # Function to stop and delete all pm2 processes
 cleanup_pm2() {
@@ -24,54 +24,56 @@ start_processes() {
     # Clear previous processes
     cleanup_pm2
 
-    echo "Starting Django app on port 8000"
-    pm2 start ./gpt-scraperdj-astro/backend/manage.py --name django-server -- runserver 8000
+    # Load environment variables
+    if [ -f .env ]; then
+        export $(cat .env | grep -v '^#' | xargs)
+    fi
+
+    echo "Starting Flask app on port 8000"
+    pm2 start ./backend/app.py --name flask-server -- --port 8000
 
     retries=0
     max_retries=100
 
     while [ $retries -lt $max_retries ]; do
-        # Check if Django process is still running
-        pm2 describe django-server > /dev/null
+        # Check if Flask process is still running
+        pm2 describe flask-server > /dev/null
         if [ $? -ne 0 ]; then
-            echo "Django server process not running, attempting to start..."
-            pm2 start ./gpt-scraperdj-astro/backend/manage.py --name django-server -- runserver 8000
+            echo "Flask server process not running, attempting to start..."
+            pm2 start ./backend/app.py --name flask-server -- --port 8000
         fi
 
-        # Check Django logs without blocking
-        error_log=$(pm2 logs django-server --nostream --lines 10 | grep "Error")
-        startup_log=$(pm2 logs django-server --nostream --lines 10 | grep "Starting development server at http://127.0.0.1:8000/")
-
-        if [[ ! -z "$startup_log" ]]; then
-            echo "Django server is up and running on port 8000"
+        # Check if the Flask server is responding
+        if curl -s http://localhost:8000 > /dev/null; then
+            echo "Flask server is up and running on port 8000"
             break
-        elif [[ ! -z "$error_log" ]]; then
-            echo "Django server encountered an error, retrying..."
-            pm2 delete django-server
-            pm2 start ./gpt-scraperdj-astro/backend/manage.py --name django-server -- runserver 8000
+        else
+            echo "Waiting for Flask server to start... (attempt $((retries + 1))/$max_retries)"
+            sleep 2
+            retries=$((retries + 1))
         fi
-
-        echo "Waiting for Django server to start... (attempt $((retries + 1))/$max_retries)"
-        sleep 2
-        retries=$((retries + 1))
     done
 
     if [ $retries -eq $max_retries ]; then
-        echo "Failed to start Django server after $max_retries attempts."
-        pm2 logs django-server --nostream --lines 50
+        echo "Failed to start Flask server after $max_retries attempts."
+        pm2 logs flask-server --nostream --lines 50
         exit 1
     fi
 
-
-    # Run GPT-teer with different indexes using pm2
+    # Run LLM servers with different indexes using pm2
     for ((index=8080; index<8080 + num_server; index++)); do
-        echo "Running GPT-Teer with index $index"
-        pm2 start ./gpt-teer/index.js --name gpt-teer-$index -- -p $index --no-headless
+        echo "Running LLM server with index $index"
+        SERVER_ID="server_$((index-8080))" \
+        LLM_PROVIDER="${LLM_PROVIDER:-openai}" \
+        LLM_BASE_URL="${LLM_BASE_URL:-http://localhost:1234/v1}" \
+        LLM_API_KEY="${LLM_API_KEY}" \
+        MODEL_NAME="${MODEL_NAME:-gpt-3.5-turbo}" \
+        pm2 start ./llm-server/index.js --name llm-server-$index -- -p $index
     done
 
     # Start scriptcron using pm2
     echo "Executing scriptcron.py"
-    pm2 start ./gpt-wright-script/scriptcron.py --name scriptcron -- -n $num_server
+    pm2 start ./backend/scriptcron.py --name scriptcron -- -n $num_server
     
     # Start pm2 logs in the background and save its PID
     pm2 logs & 
@@ -117,7 +119,7 @@ kill_django_processes() {
 }
 
 # Trap SIGINT (Ctrl+C) to kill all processes
-trap 'kill_django_processes; exit 0' SIGINT
+trap 'kill_processes; exit 0' SIGINT
 
 # Define the number of servers
 num_server=12
