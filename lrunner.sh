@@ -19,66 +19,88 @@ clear_screenshots() {
     fi
 }
 
+# Add this function before start_processes
+wait_for_port() {
+    local port=$1
+    local max_attempts=$2
+    local attempt=1
+
+    while [ $attempt -le $max_attempts ]; do
+        if nc -z localhost $port; then
+            return 0
+        fi
+        echo "Waiting for port $port... attempt $attempt/$max_attempts"
+        sleep 2
+        attempt=$((attempt + 1))
+    done
+    return 1
+}
+
 # Function to start all processes
 start_processes() {
-    # Clear previous processes
+    # Clear previous processes and PM2 save file
     cleanup_pm2
+    rm -f ~/.pm2/dump.pm2
 
-    # Load environment variables
-    if [ -f .env ]; then
-        export $(cat .env | grep -v '^#' | xargs)
-    fi
-
-    echo "Starting Flask app on port 8000"
-    pm2 start ./backend/app.py --name flask-server -- --port 8000
-
-    retries=0
-    max_retries=100
-
-    while [ $retries -lt $max_retries ]; do
-        # Check if Flask process is still running
-        pm2 describe flask-server > /dev/null
-        if [ $? -ne 0 ]; then
-            echo "Flask server process not running, attempting to start..."
-            pm2 start ./backend/app.py --name flask-server -- --port 8000
-        fi
-
-        # Check if the Flask server is responding
-        if curl -s http://localhost:8000 > /dev/null; then
-            echo "Flask server is up and running on port 8000"
-            break
-        else
-            echo "Waiting for Flask server to start... (attempt $((retries + 1))/$max_retries)"
-            sleep 2
-            retries=$((retries + 1))
-        fi
-    done
-
-    if [ $retries -eq $max_retries ]; then
-        echo "Failed to start Flask server after $max_retries attempts."
-        pm2 logs flask-server --nostream --lines 50
+    # Ensure .env exists
+    if [ ! -f .env ]; then
+        echo "Error: .env file not found in the root directory"
         exit 1
     fi
 
-    # Run LLM servers with different indexes using pm2
+    # Load environment variables for all processes
+    set -a
+    source .env
+    set +a
+
+    echo "Starting Flask app on port 8000"
+    # Start Flask using environment variables
+    pm2 start --name flask-server \
+              --interpreter python3 \
+              ./backend/app.py \
+              -- --port 8000
+
+    # Wait for Flask to be ready
+    if ! wait_for_port 8000 30; then
+        echo "Failed to start Flask server"
+        pm2 logs flask-server --lines 50
+        cleanup_pm2
+        exit 1
+    fi
+
+    echo "Flask server is running"
+
+    # Start LLM servers with delay between each
     for ((index=8080; index<8080 + num_server; index++)); do
         echo "Running LLM server with index $index"
         SERVER_ID="server_$((index-8080))" \
-        LLM_PROVIDER="${LLM_PROVIDER:-openai}" \
-        LLM_BASE_URL="${LLM_BASE_URL:-http://localhost:1234/v1}" \
-        LLM_API_KEY="${LLM_API_KEY}" \
-        MODEL_NAME="${MODEL_NAME:-gpt-3.5-turbo}" \
-        pm2 start ./llm-server/index.js --name llm-server-$index -- -p $index
+        pm2 start ./llm-server/index.js \
+            --name "llm-server-$index" \
+            -- -p $index
+
+        # Wait a bit between server starts to prevent resource contention
+        sleep 1
+        
+        # Check if server started successfully
+        if ! wait_for_port $index 10; then
+            echo "Failed to start LLM server on port $index"
+            cleanup_pm2
+            exit 1
+        fi
     done
 
-    # Start scriptcron using pm2
+    # Start scriptcron after all servers are ready
     echo "Executing scriptcron.py"
     pm2 start ./backend/scriptcron.py --name scriptcron -- -n $num_server
-    
-    # Start pm2 logs in the background and save its PID
+
+    # Save PM2 process list
+    echo "Saving PM2 process list..."
+    pm2 save
+
+    # Start pm2 logs in the background
     pm2 logs & 
     pm2_logs_pid=$!
-    
+
     echo "All tasks started successfully."
 }
 
@@ -122,7 +144,7 @@ kill_django_processes() {
 trap 'kill_processes; exit 0' SIGINT
 
 # Define the number of servers
-num_server=12
+num_server=1
 data_collection_time=$((60 * 30))  # 30 minutes
 collection_restart_time=$((60 * 1))  # 1 minute
 
