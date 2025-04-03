@@ -1,9 +1,17 @@
 import express from "express";
 import dotenv from "dotenv";
+import path from "path";
+import { fileURLToPath } from "url";
+
+// Get directory name in ES module
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// Load .env from root directory
+dotenv.config({ path: path.join(__dirname, "..", ".env") });
+
 import process from "process";
 import { OpenAI } from "openai";
-
-dotenv.config();
 
 const app = express();
 app.use(express.json());
@@ -25,16 +33,27 @@ const serverConversations = {};
 
 // Initialize LLM client based on provider
 function initializeLLMClient() {
-  const provider = process.env.LLM_PROVIDER?.toLowerCase() || "openai";
+  const provider = process.env.LLM_PROVIDER?.toLowerCase() || "lmstudio";
+  console.log(`Initializing LLM client for provider: ${provider}`);
+  console.log(`Using base URL: ${process.env.LLM_BASE_URL}`);
 
   const config = {
-    apiKey: process.env.LLM_API_KEY,
+    apiKey: process.env.LLM_API_KEY || "sk-no-key-required",
+    baseURL: process.env.LLM_BASE_URL || "http://localhost:1234/v1",
+    defaultHeaders: {
+      "Content-Type": "application/json",
+    },
+    dangerouslyAllowBrowser: true,
+    maxRetries: 3,
+    timeout: 120000, // Increase timeout to 120 seconds
+    defaultQuery: { timeout: 120 }, // Add query parameter for timeout
+    defaultParams: { timeout: 120 }, // Add params for timeout
   };
 
-  // Add base URL for non-OpenAI providers
-  if (provider !== "openai") {
-    config.baseURL = process.env.LLM_BASE_URL;
-  }
+  console.log("LLM Configuration:", {
+    ...config,
+    apiKey: "[HIDDEN]",
+  });
 
   return new OpenAI(config);
 }
@@ -227,6 +246,22 @@ app.post("/conversation", sequentialMiddleware, async (req, res) => {
   }
 });
 
+// Add this helper function for cleaning responses
+function cleanResponse(text) {
+  if (!text) return text;
+
+  // Remove think tags and their content
+  let cleaned = text.replace(/<think>[\s\S]*?<\/think>/g, "");
+
+  // Split by newlines and remove empty lines
+  let lines = cleaned.split("\n").filter((line) => line.trim());
+
+  // Get the last non-empty line as it's usually the final response
+  let finalResponse = lines[lines.length - 1] || "";
+
+  return finalResponse.trim();
+}
+
 async function processCompletion(serverId, chatId, prompt) {
   try {
     if (prompt.length > 4096) {
@@ -253,41 +288,71 @@ async function processCompletion(serverId, chatId, prompt) {
       chatSession.messages = chatSession.messages.slice(-10);
     }
 
-    // Call LLM API with provider-specific configuration
-    const response = await llmClient.chat.completions.create({
-      model: process.env.MODEL_NAME || "gpt-3.5-turbo",
-      messages: chatSession.messages,
+    // Add system message to enforce response format
+    const messages = [
+      {
+        role: "system",
+        content:
+          "Provide direct responses without thinking out loud. Avoid using phrases like 'let me think' or explanatory prefixes. Give natural, conversational responses.",
+      },
+      ...chatSession.messages,
+    ];
+
+    console.log("Sending request to LLM service with configuration:", {
+      model: process.env.MODEL_NAME,
       max_tokens: parseInt(process.env.MAX_TOKENS || "1000"),
       temperature: parseFloat(process.env.TEMPERATURE || "0.7"),
+      timeout: 120,
     });
 
-    const responseText = response.choices[0].message.content;
+    const response = await Promise.race([
+      llmClient.chat.completions.create({
+        model: process.env.MODEL_NAME,
+        messages: messages,
+        max_tokens: parseInt(process.env.MAX_TOKENS || "1000"),
+        temperature: parseFloat(process.env.TEMPERATURE || "0.7"),
+        stream: false,
+        timeout: 120,
+      }),
+      new Promise((_, reject) =>
+        setTimeout(
+          () => reject(new Error("Request timeout after 120s")),
+          120000
+        )
+      ),
+    ]);
+
+    // Clean the response using our helper function
+    const responseText = cleanResponse(response.choices[0].message.content);
     chatSession.messages.push({ role: "assistant", content: responseText });
 
     console.log(
-      `Prompt response for chat ${chatId} on server ${serverId}: \n`,
+      `Cleaned response for chat ${chatId} on server ${serverId}: \n`,
       responseText
     );
     return responseText;
   } catch (error) {
+    console.error("Detailed error:", {
+      message: error.message,
+      name: error.name,
+      code: error.code,
+      response: error.response,
+      stack: error.stack,
+    });
+
     numErr++;
     await handleGlobalError(serverId);
 
-    console.error(`API Error for server ${serverId}:`, error);
-
-    // Handle provider-specific error cases
     if (
-      error.response?.status === 429 ||
-      error.message?.includes("rate limit")
+      error.message?.includes("timeout") ||
+      error.message?.includes("ECONNREFUSED")
     ) {
-      await closeChatSession(serverId, chatId);
-      return { message: "Rate limit exceeded. Please try again later." };
-    }
-
-    if (error.message?.includes("connect ECONNREFUSED")) {
+      console.error(
+        `Connection issue with LM Studio (${error.message}). Please ensure it's running and not overloaded.`
+      );
       return {
         message:
-          "LLM service not available. Please check the server connection.",
+          "LLM service is currently busy or unavailable. Please try again later.",
       };
     }
 
@@ -321,8 +386,31 @@ process.argv.forEach((arg, index) => {
   }
 });
 
-app.listen(port, () => {
+app.listen(port, async () => {
   console.log(`Server is listening on port ${port}`);
+
+  // Test LLM connection with timeout
+  try {
+    const response = await Promise.race([
+      llmClient.chat.completions.create({
+        model: process.env.MODEL_NAME,
+        messages: [{ role: "user", content: "test" }],
+        max_tokens: 5,
+        timeout: 30,
+      }),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("Initial connection timeout")), 30000)
+      ),
+    ]);
+    console.log("Successfully connected to LLM service");
+  } catch (error) {
+    console.error("Failed to connect to LLM service:", error.message);
+    console.log("Please ensure LM Studio is:");
+    console.log("1. Running and accessible at:", process.env.LLM_BASE_URL);
+    console.log("2. Has the correct model loaded:", process.env.MODEL_NAME);
+    console.log("3. API is enabled in LM Studio");
+    console.log("4. Not overloaded with requests");
+  }
 });
 
 // Cleanup function to call when the process is shutting down
