@@ -69,14 +69,21 @@ class HTTPMethod:
 def fetch_url(url, method=HTTPMethod.POST, data=None, max_retries=5):
     for attempt in range(max_retries):
         try:
-            response = requests.request(method, url, json=data, timeout=30)
+            # Increased timeout to 60 seconds and added connection pool settings
+            response = requests.request(
+                method, 
+                url, 
+                json=data, 
+                timeout=60,
+                headers={'Connection': 'close'},  # Force connection close
+            )
             if response.status_code == 200:
                 return response.json()
             logging.error(f"Request failed with status {response.status_code}")
         except Exception as e:
             logging.error(f"Request attempt {attempt + 1} failed: {e}")
             if attempt < max_retries - 1:
-                sleep(2 ** attempt)  # Exponential backoff
+                sleep(5 + (2 ** attempt))  # Increased exponential backoff
     return None
 
 @app.route("/")
@@ -159,7 +166,7 @@ def generate_conversation():
                     break
                 
                 logging.info(f"Chat One response: {chat_one_response['response'][:100]}...")
-                # sleep(10)  # Wait between responses
+                sleep(15)  # Increased wait between responses
 
                 # Second chat responds to first
                 chat_two_response = fetch_url(
@@ -171,7 +178,7 @@ def generate_conversation():
 
                 logging.info(f"Chat Two response: {chat_two_response['response'][:100]}...")
                 
-                # Save responses directly since they're already cleaned by the LLM server
+                # Save responses and wait longer between conversations
                 if chat_one_response and chat_two_response:
                     conversation = Conversation(
                         start_conversation=chat_one_response["response"],
@@ -182,7 +189,7 @@ def generate_conversation():
                 
                 no_conversation += 1
                 logging.info(f"Conversation pair {no_conversation} saved")
-                sleep(10)
+                sleep(15)  # Increased wait between conversation pairs
 
             return {"message": "Conversation generated successfully", "pairs_generated": no_conversation}
 

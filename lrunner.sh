@@ -123,7 +123,7 @@ kill_processes() {
 }
 
 # Function to kill processes on Ctrl+C
-kill_django_processes() {
+kill_flask_processes() {
     echo "Killing all processes..."
     cleanup_pm2
 
@@ -144,7 +144,7 @@ kill_django_processes() {
 trap 'kill_processes; exit 0' SIGINT
 
 # Define the number of servers
-num_server=1
+num_server=12
 data_collection_time=$((60 * 30))  # 30 minutes
 collection_restart_time=$((60 * 1))  # 1 minute
 

@@ -44,10 +44,10 @@ function initializeLLMClient() {
       "Content-Type": "application/json",
     },
     dangerouslyAllowBrowser: true,
-    maxRetries: 3,
-    timeout: 120000, // Increase timeout to 120 seconds
-    defaultQuery: { timeout: 120 }, // Add query parameter for timeout
-    defaultParams: { timeout: 120 }, // Add params for timeout
+    maxRetries: 5,
+    timeout: 180000, // Increased timeout to 180 seconds
+    defaultQuery: { timeout: 180 },
+    defaultParams: { timeout: 180 },
   };
 
   console.log("LLM Configuration:", {
@@ -302,7 +302,7 @@ async function processCompletion(serverId, chatId, prompt) {
       model: process.env.MODEL_NAME,
       max_tokens: parseInt(process.env.MAX_TOKENS || "1000"),
       temperature: parseFloat(process.env.TEMPERATURE || "0.7"),
-      timeout: 120,
+      timeout: 180,
     });
 
     const response = await Promise.race([
@@ -312,12 +312,12 @@ async function processCompletion(serverId, chatId, prompt) {
         max_tokens: parseInt(process.env.MAX_TOKENS || "1000"),
         temperature: parseFloat(process.env.TEMPERATURE || "0.7"),
         stream: false,
-        timeout: 120,
+        timeout: 180,
       }),
       new Promise((_, reject) =>
         setTimeout(
-          () => reject(new Error("Request timeout after 120s")),
-          120000
+          () => reject(new Error("Request timeout after 180s")),
+          180000
         )
       ),
     ]);
