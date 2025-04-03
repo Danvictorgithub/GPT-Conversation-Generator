@@ -4,11 +4,11 @@ import random
 import signal
 import argparse
 from aiohttp import ClientSession
+from time import sleep
 
-# Define the number of servers
-n_value = 16
+stop_fetching = False
 
-# Define chatSettings (example settings, replace with actual settings)
+# Define comprehensive chat settings
 chatSettings = [
     {
         "topic": "life",
@@ -60,8 +60,11 @@ chatSettings = [
     }
 ]
 
-stop_fetching = False
+class HTTPMethod:
+    GET = "GET"
+    POST = "POST"
 
+# Signal handler for graceful shutdown
 def signal_handler(signal, frame):
     global stop_fetching
     stop_fetching = True
@@ -69,6 +72,7 @@ def signal_handler(signal, frame):
 signal.signal(signal.SIGTERM, signal_handler)
 signal.signal(signal.SIGINT, signal_handler)
 
+# Generate a random subject for conversation
 def generate_random_subject():
     subjects = [
         "Technology", "Science", "Health", "Education", "Business", "Entertainment", 
@@ -76,207 +80,116 @@ def generate_random_subject():
         "Books", "Movies", "Fashion", "Hobbies", "Relationships", "Fitness", "Culture",
         "Games", "Cartoons", "Toys", "Friends", "School", "Holidays"
     ]
-    
     return random.choice(subjects)
 
-class HTTPMethod:
-    GET = "GET"
-    POST = "POST"
-    PUT = "PUT"
-    DELETE = "DELETE"
-
-async def fetch_url(url, method: HTTPMethod = HTTPMethod.GET, *args, **kwargs):
-    async with ClientSession() as session:
-        method_action = {
-            HTTPMethod.GET: session.get,
-            HTTPMethod.POST: session.post,
-            HTTPMethod.DELETE: session.delete,
-            HTTPMethod.PUT: session.put,
-        }.get(method, session.get)  # Default to GET if method is not found
-
-        async with method_action(url, *args, **kwargs) as response:
-            return await response.json()
-
-async def fetch_with_retry(url, method, data, max_retries=5, delay=1):
+# Fetch URL with retry logic
+async def fetch_with_retry(url, method, data=None, max_retries=5, delay=1):
     attempt = 0
     while attempt < max_retries:
         try:
             async with ClientSession() as session:
                 async with session.request(method, url, json=data) as response:
-                    response_text = await response.text()
                     if response.status == 200:
                         return await response.json()
-                    else:
-                        logging.error(f"Request to {url} failed with status {response.status}: {response_text}")
+                    logging.error(f"Request failed with status {response.status}")
         except Exception as e:
-            logging.error(f"Exception during request to {url}: {e}")
+            logging.error(f"Request exception: {e}")
         
         attempt += 1
         if attempt < max_retries:
-            await asyncio.sleep(delay)  # Exponential backoff
+            await asyncio.sleep(delay)
     return None
 
-MAX_RETRIES = 100
-
-async def generate_conversation(server_url, server_id, chat_setting):
-    """Generate a complete conversation using the API server"""
+# Generate conversation pair
+async def generate_conversation_pair(flask_url, server_url, chat_setting, max_prompt):
     try:
-        # Step 1: Start a new chat session with server ID
-        async with ClientSession() as session:
-            async with session.post(
-                f"{server_url}/start",
-                json={"serverId": server_id}
-            ) as response:
-                if response.status != 200:
-                    return None
-                start_data = await response.json()
-                chat_id = start_data["chatId"]
+        # Initialize chat sessions
+        data = {
+            "server_url": server_url,
+            "initial_message": chat_setting["initial_message"],
+            "topic": chat_setting["topic"],
+            "max_prompt": max_prompt
+        }
         
-        # Step 2: Send the initial message with server ID
-        initial_response = await send_message(server_url, server_id, chat_id, chat_setting["initial_message"])
-        if not initial_response:
-            return None
-            
-        conversation = [
-            {"role": "system", "content": chat_setting["initial_message"]},
-            {"role": "assistant", "content": initial_response}
-        ]
+        response = await fetch_with_retry(
+            f"{flask_url}/generate_conversation",
+            HTTPMethod.POST,
+            data
+        )
         
-        # Generate 3-7 conversation turns
-        conversation_turns = random.randint(3, 7)
-        for i in range(conversation_turns):
-            user_message = await generate_follow_up(conversation)
-            conversation.append({"role": "user", "content": user_message})
+        if not response:
+            logging.error("Failed to generate conversation")
+            return False
             
-            assistant_response = await send_message(server_url, server_id, chat_id, user_message)
-            if not assistant_response:
-                break
-                
-            conversation.append({"role": "assistant", "content": assistant_response})
-            
-        return conversation
-    
+        logging.info(f"Successfully generated conversation with {max_prompt} prompts")
+        return True
+
     except Exception as e:
-        logging.error(f"Error generating conversation on server {server_id}: {e}")
-        return None
+        logging.error(f"Error generating conversation: {e}")
+        return False
 
-async def send_message(server_url, server_id, chat_id, message):
-    """Send a message to the API server and get the response"""
-    try:
-        async with ClientSession() as session:
-            async with session.post(
-                f"{server_url}/conversation",
-                json={
-                    "chatId": chat_id,
-                    "serverId": server_id,
-                    "prompt": message
-                }
-            ) as response:
-                if response.status != 200:
-                    return None
-                data = await response.json()
-                return data["response"]
-    except Exception as e:
-        logging.error(f"Error sending message to server {server_id}: {e}")
-        return None
-
-async def generate_follow_up(conversation):
-    """Generate a follow-up message based on conversation history"""
-    # In a real implementation, you might use another AI call to generate this
-    # For now, using simple templates
-    follow_ups = [
-        "That's interesting. What do you think about {topic}?",
-        "I've been wondering about {topic} lately. Any thoughts?",
-        "Do you ever think about {topic}?",
-        "I'm curious what you mean by that. Can you explain more?",
-        "That reminds me of {topic}. Have you had any experiences with that?",
-        "I agree. What about {topic}?",
-        "How do you feel about {topic}?",
-        "I've never thought about it that way. What else do you think about {topic}?"
-    ]
-    
-    topics = [
-        "traveling", "cooking", "movies", "books", "music", "sports", 
-        "technology", "art", "history", "science", "nature", "games"
-    ]
-    
-    template = random.choice(follow_ups)
-    topic = random.choice(topics)
-    
-    return template.replace("{topic}", topic)
-
-async def continuous_fetch(server_index):
-    gpt_server = gpt_servers[server_index]
-    server_id = f"server_{server_index}"
-    chat_setting = random.choice(chatSettings)
+# Continuous fetch loop for each server
+async def continuous_fetch(server_index, flask_server_url, gpt_server, chat_setting, max_prompt):
     retries = 0
-
     while not stop_fetching:
         try:
-            url = f"{gen_server}/api/generate_conversation"
+            logging.info(f"Starting conversation generation for server {server_index + 1}")
+            success = await generate_conversation_pair(
+                flask_server_url,
+                gpt_server,
+                chat_setting,
+                max_prompt
+            )
             
-            conversation = await generate_conversation(gpt_server, server_id, chat_setting)
-            
-            if conversation:
-                data = {
-                    "server_url": gpt_server,
-                    "server_id": server_id,
-                    "conversation": conversation,
-                    "chat_setting": chat_setting
-                }
-                
-                response = await fetch_with_retry(url, HTTPMethod.POST, data, max_retries=MAX_RETRIES)
-                if response:
-                    logging.info(f"Successfully sent conversation from server {server_id}")
-                    retries = 0
-                else:
-                    logging.error(f"Failed to send conversation from server {server_id}")
-                    retries += 1
-                    if retries >= MAX_RETRIES:
-                        logging.error(f"Max retries reached for server {server_id}")
-                        break
+            if success:
+                chat_setting["topic"] = generate_random_subject()
+                retries = 0
+                await asyncio.sleep(10)  # Wait between conversations
             else:
-                logging.error(f"Failed to generate conversation on server {server_id}")
                 retries += 1
-            
-            chat_setting["topic"] = generate_random_subject()
-            
-            # Add random delay between 0.1 and 0.5 seconds to prevent thundering herd
-            await asyncio.sleep(random.uniform(0.1, 0.5))
-        
+                if retries >= 5:
+                    logging.error(f"Max retries reached for server {server_index + 1}")
+                    break
+                await asyncio.sleep(30)  # Longer wait on failure
+                
         except Exception as e:
-            logging.error(f"Error in continuous fetch loop for server {server_id}: {e}")
+            logging.error(f"Error in fetch loop for server {server_index + 1}: {e}")
             retries += 1
-            if retries >= MAX_RETRIES:
-                logging.error(f"Max retries reached for server {server_id}")
+            if retries >= 5:
                 break
-            await asyncio.sleep(1)  # Wait before retrying
-    
-    print(f"Stopping fetch loop for server {server_id}")
-
-# Define the argument parser
-parser = argparse.ArgumentParser(description="Script to continuously fetch data from servers.")
-
-# Add arguments
-parser.add_argument('-n', type=int, default=10, help="An integer number (default is 10)")
-
-# Parse the arguments
-args = parser.parse_args()
-
-# Access the value of 'n'
-n_value = args.n
-
-# Define the gen_server and gpt_servers
-gen_server = "http://localhost:8000"
-gpt_servers = [f"http://localhost:{8080 + i}" for i in range(n_value)]
+            await asyncio.sleep(30)
 
 async def main():
-    tasks = [continuous_fetch(i) for i in range(n_value)]
+    tasks = [
+        continuous_fetch(
+            i,
+            flask_server_url,
+            gpt_servers[i],
+            random.choice(chatSettings),
+            max_prompt
+        ) for i in range(args.n)
+    ]
     await asyncio.gather(*tasks)
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
+    parser = argparse.ArgumentParser(description="Script to send configuration to Flask server.")
+    parser.add_argument('-n', type=int, default=10, help="Number of GPT servers (default is 10)")
+    parser.add_argument('--flask_server', type=str, default="http://localhost:8000", help="Flask server URL")
+    parser.add_argument('--max_prompt', type=int, default=5, help="Maximum number of prompts per conversation")
+    args = parser.parse_args()
+
+    n_value = args.n
+    flask_server_url = args.flask_server
+    max_prompt = args.max_prompt
+    gpt_servers = [f"http://localhost:{8080 + i}" for i in range(n_value)]
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s [%(levelname)s] %(message)s'
+    )
+    
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("Interrupted by user")
+        stop_fetching = True
+        print("Shutting down gracefully...")
